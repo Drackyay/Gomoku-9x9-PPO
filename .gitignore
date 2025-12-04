@@ -37,7 +37,7 @@ ENV/
 
 # Project specific
 models/*.zip
-models/*.pth
+# models/*.pth  # Allow model files to be tracked
 models/*.pkl
 models/checkpoints/
 logs/
