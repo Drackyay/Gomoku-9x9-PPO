@@ -38,6 +38,7 @@ ENV/
 # Project specific
 models/*.zip
 models/*.pth
+models/*.pkl
 models/checkpoints/
 logs/
 !models/.gitkeep
