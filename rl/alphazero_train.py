@@ -12,6 +12,9 @@ This is how AlphaGo Zero achieved superhuman play!
 
 import sys
 from pathlib import Path
+import csv
+from datetime import datetime
+
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -22,9 +25,9 @@ import torch.nn.functional as F
 import numpy as np
 from collections import deque
 import random
-from datetime import datetime
 from tqdm import tqdm
 import math
+import pickle
 
 
 # ============== NEURAL NETWORK ==============
@@ -362,6 +365,11 @@ class ReplayBuffer:
     def add(self, state, policy, value):
         self.buffer.append((state, policy, value))
     
+    def add_batch(self, data_list):
+        """Add multiple samples at once."""
+        for state, policy, value in data_list:
+            self.buffer.append((state, policy, value))
+    
     def sample(self, batch_size):
         batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
         states, policies, values = zip(*batch)
@@ -497,6 +505,37 @@ def check_winner(board, row, col, player):
 
 
 # ============== TRAINING ==============
+
+def load_heuristic_data(data_file="heuristic_data.pkl", max_samples=None):
+    """
+    Load heuristic training data from pickle file.
+    
+    Args:
+        data_file: Path to the pickle file containing heuristic data
+        max_samples: Maximum number of samples to load (None = all)
+    
+    Returns:
+        List of (state, policy, value) tuples
+    """
+    data_path = project_root / "models" / data_file
+    
+    if not data_path.exists():
+        print(f"Warning: Heuristic data file not found: {data_path}")
+        return []
+    
+    print(f"Loading heuristic data from {data_path}...")
+    with open(data_path, 'rb') as f:
+        data = pickle.load(f)
+    
+    if max_samples is not None and len(data) > max_samples:
+        # Randomly sample if too many
+        data = random.sample(data, max_samples)
+        print(f"  Randomly sampled {max_samples} samples from {len(data)} total")
+    else:
+        print(f"  Loaded {len(data)} samples")
+    
+    return data
+
 
 def evaluate_loss(model, replay_buffer, batch_size=256, device="cuda"):
     """Evaluate model loss on replay buffer without training."""
@@ -692,6 +731,9 @@ def train_alphazero(
     adaptive_simulations=True,
     use_curriculum=True,
     opponent_ratio=0.5,
+    load_heuristic=False,
+    heuristic_data_file="heuristic_data.pkl",
+    heuristic_samples=None,
 ):
     """
     AlphaZero training loop.
@@ -703,6 +745,48 @@ def train_alphazero(
     model = GomokuNet(board_size=9, num_channels=64, num_res_blocks=3).to(device)
     replay_buffer = ReplayBuffer(max_size=50000)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    
+    # Load heuristic data if requested
+    if load_heuristic:
+        heuristic_data = load_heuristic_data(heuristic_data_file, max_samples=heuristic_samples)
+        if heuristic_data:
+            print(f"Adding {len(heuristic_data)} heuristic samples to replay buffer...")
+            replay_buffer.add_batch(heuristic_data)
+            print(f"Replay buffer size: {len(replay_buffer)}")
+    
+    metrics_dir = project_root / "metrics"
+    metrics_dir.mkdir(exist_ok=True)
+    loss_log_path = metrics_dir / "loss_history.csv"
+    wins_log_path = metrics_dir / "win_history.csv"
+    
+    if not loss_log_path.exists():
+        with loss_log_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "iteration",
+                "timestamp",
+                "current_simulations",
+                "replay_buffer_size",
+                "training_mode",
+                "opponent_games",
+                "self_play_games",
+                "initial_loss",
+                "final_loss",
+                "loss_reduction",
+                "loss_reduction_pct",
+            ])
+    
+    if not wins_log_path.exists():
+        with wins_log_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "iteration",
+                "timestamp",
+                "current_simulations",
+                "games_per_iteration",
+                "win_rate_vs_heuristic",
+                "best_win_rate_so_far",
+            ])
     
     # Try to resume from checkpoint
     start_iteration = 0
@@ -754,9 +838,10 @@ def train_alphazero(
                 self_play_games = games_per_iteration
                 training_mode = "self-play (warm-up)"
             elif iteration < num_iterations * 0.8:
-                opponent_games = int(games_per_iteration * opponent_ratio)
-                self_play_games = games_per_iteration - opponent_games
-                training_mode = "mixed (self-play + heuristic)"
+                # int(games_per_iteration * opponent_ratio)
+                opponent_games = games_per_iteration
+                self_play_games = 0
+                training_mode = " heuristic"
             else:
                 opponent_games = int(games_per_iteration * (opponent_ratio * 0.5))
                 self_play_games = games_per_iteration - opponent_games
@@ -817,18 +902,44 @@ def train_alphazero(
             print("     - Try reducing learning rate further")
             print("     - Check if training data quality is good")
         
+        with loss_log_path.open("a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                iteration + 1,
+                datetime.utcnow().isoformat(),
+                current_simulations,
+                len(replay_buffer),
+                training_mode,
+                opponent_games,
+                self_play_games,
+                float(initial_loss),
+                float(final_loss),
+                float(loss_reduction),
+                float(loss_reduction_pct),
+            ])
+        
         mcts.model = model
         
-        # Evaluation every 5 iterations
         if (iteration + 1) % 5 == 0:
             print("Evaluating...")
             win_rate = evaluate_model(model, device=device, num_games=20)
             print(f"Win rate vs heuristic: {win_rate:.0%}")
             
+            with wins_log_path.open("a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    iteration + 1,
+                    datetime.utcnow().isoformat(),
+                    current_simulations,
+                    games_per_iteration,
+                    float(win_rate),
+                    float(best_win_rate),
+                ])
+            
             if win_rate > best_win_rate:
                 best_win_rate = win_rate
                 torch.save(model.state_dict(), str(models_dir / "alphazero_best.pth"))
-                print(f"New best model saved!")
+                print("New best model saved!")
         
         # Save checkpoint
         torch.save(model.state_dict(), str(models_dir / "alphazero_latest.pth"))
@@ -853,6 +964,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-curriculum", action="store_true", help="Disable curriculum learning")
     parser.add_argument("--opponent-ratio", type=float, default=0.5, help="Ratio of games vs opponent (0.0-1.0)")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--load-heuristic", action="store_true", help="Load heuristic training data")
+    parser.add_argument("--heuristic-file", type=str, default="heuristic_data.pkl", help="Heuristic data file name")
+    parser.add_argument("--heuristic-samples", type=int, default=None, help="Max number of heuristic samples to load")
     args = parser.parse_args()
     
     train_alphazero(
@@ -864,5 +978,8 @@ if __name__ == "__main__":
         use_curriculum=not args.no_curriculum,
         opponent_ratio=args.opponent_ratio,
         lr=args.lr,
+        load_heuristic=args.load_heuristic,
+        heuristic_data_file=args.heuristic_file,
+        heuristic_samples=args.heuristic_samples,
     )
 
