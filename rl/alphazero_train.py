@@ -600,6 +600,7 @@ def train_alphazero(
     batch_size=256,
     train_epochs=10,
     lr=1e-3,
+    resume=True,  # Auto-resume from checkpoint
 ):
     """
     AlphaZero training loop.
@@ -610,6 +611,20 @@ def train_alphazero(
     # Initialize
     model = GomokuNet(num_res_blocks=5).to(device)
     replay_buffer = ReplayBuffer(max_size=50000)
+    
+    # Try to resume from checkpoint
+    start_iteration = 0
+    models_dir = project_root / "models"
+    checkpoint_path = models_dir / "alphazero_latest.pth"
+    
+    if resume and checkpoint_path.exists():
+        try:
+            model.load_state_dict(torch.load(str(checkpoint_path), map_location=device))
+            print(f"✓ Resumed from checkpoint: {checkpoint_path}")
+            # Note: We can't restore iteration number, so we start fresh but with trained weights
+        except Exception as e:
+            print(f"Could not load checkpoint: {e}")
+    
     mcts = AlphaZeroMCTS(model, device=device, num_simulations=mcts_simulations)
     
     models_dir = project_root / "models"
@@ -675,11 +690,13 @@ if __name__ == "__main__":
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--games", type=int, default=50)
     parser.add_argument("--simulations", type=int, default=100)
+    parser.add_argument("--no-resume", action="store_true", help="Start fresh, don't load checkpoint")
     args = parser.parse_args()
     
     train_alphazero(
         num_iterations=args.iterations,
         games_per_iteration=args.games,
         mcts_simulations=args.simulations,
+        resume=not args.no_resume,
     )
 
